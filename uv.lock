@@ -1548,6 +1548,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyarrow" },
+    { name = "pyyaml" },
     { name = "scipy" },
 ]
 
@@ -1565,6 +1566,7 @@ requires-dist = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyarrow" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scipy" },
 ]
 

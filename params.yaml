@@ -1,0 +1,32 @@
+filter:
+  min_user_reviews: 5
+  max_user_reviews: 168
+  min_game_reviews: 50
+
+split:
+  val_users: 2000
+  test_users: 5000
+  n_seeds: 3
+  random_seed: 42
+
+cf:
+  confidence_scale: 1.0     # c in 1 + c * log(1 + hours); 0 = plain likes
+  shrinkage: 10.0           # λ in cos * n / (n + λ); must be > 0
+  top_k: 100
+  chunk_size: 1000
+
+content:
+  tag_weight: 0.6           # share of tag similarity when both games have a description
+  top_k: 100
+  chunk_size: 500
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
+  batch_size: 256
+
+hybrid:
+  alpha_max: 0.7
+  popularity_halfpoint: 200.0
+
+evaluate:
+  k: 10
+  alpha_max_grid: [0.3, 0.5, 0.7, 0.9]
+  halfpoint_grid: [50.0, 200.0, 1000.0]
