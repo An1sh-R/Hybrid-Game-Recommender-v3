@@ -47,6 +47,8 @@
 | Data tooling | **pandas + numpy + scipy.sparse** (pyarrow only for Parquet). CSVs are read with `usecols` and small types (`int32`/`float32`/`bool`) and converted to **Parquet once**. **No Polars, DuckDB or SQLite.** | Simple, familiar tools. With explicit types the 41M-row table takes 535 MB in memory (measured in the EDA). Sparse matrices are required for similarity. A database adds nothing for batch processing. |
 | Data size | **Filter to an active core** (min reviews per user, min reviews per game) | Fits in 16 GB of RAM, and active users carry most of the CF signal. Cold users are handled by the content side. |
 | Filter thresholds | **`min_user_reviews = 5`, `min_game_reviews = 50`** (positive reviews; users filtered first, then games among those users). Keeps **17.7M interactions (50% of positive reviews), 1.62M users and 13,160 games**. Stored in `params.yaml`. | Held-out evaluation users need at least 5 reviews anyway (3 seeds plus at least 2 hidden). The median user has only 1 positive review, and a user with a single review adds nothing to item-to-item co-occurrence. |
+| Heavy users | **Drop users with more than 168 positive reviews** (`max_user_reviews`, the top 0.1% of active users: 1,616 users, 2.7% of reviews) | One user with n liked games links n·(n−1)/2 game pairs. In the EDA, the top 0.1% produced 41% of all pairs, so a handful of users would decide the similarities. Dropping them is simpler than weighting them. |
+| Hours outliers | Nothing extra. Only 26 reviews sit at the 1,000-hour cap. | The log in the confidence formula already squashes large values. |
 | Planned experiment | Train on users with **3 or more** reviews (23.3M interactions, 3.3M users), with evaluation users still drawn from those with 5 or more. Compared using `dvc exp`. | Tests whether lighter users improve recall. |
 | Adult content | **No filter. All games are kept.** | The user's decision. The EDA showed the obvious tags ("Sexual Content", "Nudity", "Mature") also cover mainstream games like The Witcher 2 and Far Cry 3. |
 | Selectable seeds | The **~13k games that pass the CF filter** (at least 50 positive reviews from active users), popular games first in search | People pick games they recognise, and every seed has CF neighbours. One rule, no extra parameter. |
@@ -95,7 +97,7 @@
 
 1. `download`: fetch the dataset with **`kagglehub`** (`kagglehub.dataset_download("antonkozyriev/game-recommendations-on-steam")`) and copy the files from kagglehub's cache into `data/raw/`, which DVC tracks
 2. `validate`: **Pandera** schemas and sanity checks (columns, types, unique IDs, metadata coverage). Fails loudly if the data is wrong.
-3. `filter`: drop duplicate reviews, keep positive reviews, apply the activity thresholds
+3. `filter`: drop duplicate reviews, keep positive reviews, apply the activity thresholds, drop heavy users
 4. `split`: train, validation and test users
 5. `content_features`: tag TF-IDF and description embeddings (GPU locally, CPU in CI)
 6. `cf_similarity`: confidence-weighted, shrunk cosine similarity, top-K neighbours
