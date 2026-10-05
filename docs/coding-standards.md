@@ -326,7 +326,7 @@ active = (pd.read_csv(path).query("is_recommended").pipe(lambda d: d[d.groupby("
 - **Branch names:** `feat/cf-similarity`, `fix/search-encoding`, `docs/readme-metrics`, `chore/ruff-config`.
 - **Commit messages:** a plain sentence written the way a person would describe the change. Start with a capital letter and an action word, no type prefix (`feat:`, `chore:`, `fix:` …), no full stop, about 60 characters at most. If the reason isn't obvious, add a blank line and a short body explaining *why*.
   - Good: `Add shrunk cosine similarity for item neighbours`
-  - Good: `Fix search returning games from the blocklist`
+  - Good: `Fix search returning games without tags`
   - Avoid: `feat: add shrunk cosine similarity`, `update stuff`, `wip`
 - **Keep pull requests small:** roughly under 400 lines changed, excluding lockfiles.
 - **Self-review checklist** (in the pull request template):

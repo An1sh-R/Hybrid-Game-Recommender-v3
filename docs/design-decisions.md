@@ -1,7 +1,7 @@
 # Hybrid Steam Recommender — Brainstorm Design Decisions
 
 **Date:** 2026-10-04
-**Status:** Brainstorm complete for product, data, modelling, pipeline, API, frontend and engineering practice. **Deployment is deliberately left open** and will be decided in a later session.
+**Status:** Brainstorm complete for product, data, modelling, pipeline, API, frontend and engineering practice. Data decisions settled from the EDA (2026-10-05). **Deployment is mostly left open** (the API host is decided: Render) and will be finished in a later session.
 
 ---
 
@@ -40,14 +40,17 @@
 | Decision | Choice | Why |
 |---|---|---|
 | Extra metadata from the Steam Storefront API or SteamSpy | **No.** Tags and descriptions are enough. | Tags already cover genre and mechanics. Avoids a crawler that would take about a day. Could be added later as "data v2". |
-| Positive signal | `is_recommended = True`, with **confidence = f(log(1 + hours))** | Standard implicit-feedback setup. Separates a 2-hour thumbs-up from a 400-hour one. |
+| Positive signal | `is_recommended = True`, with **confidence = 1 + c · log(1 + hours)**, `c` tuned over {0, 0.5, 1} | Standard implicit-feedback setup. Separates a 2-hour thumbs-up from a 400-hour one. `c = 0` treats every thumbs-up the same, which tests whether hours help. The EDA showed median hours of 30.3 for positive reviews vs 11.1 for negative. Hours are capped at 1,000 in the source data, which the log handles. |
+| Duplicates | Drop the **21 duplicate `(user_id, app_id)` reviews** in the `filter` stage | Found in the EDA. Each user–game pair should appear once. |
+| Raw data | **`data/raw/` is never edited by hand.** Cleaning happens in code. | Keeps the pipeline reproducible. Re-running `download` would overwrite manual edits anyway. |
 | Negative reviews | Kept in the data, **ignored in the similarity for v1** | Subtracting them adds complexity for little expected gain. They can still be used as an experiment. |
-| Data tooling | **pandas + numpy + scipy.sparse** (pyarrow only for Parquet). CSVs are read with `usecols` and small types (`int32`/`float32`/`bool`) and converted to **Parquet once**. **No Polars, DuckDB or SQLite.** | Simple, familiar tools. With explicit types the 41M-row table is about 1.5 GB in memory. Sparse matrices are required for similarity. A database adds nothing for batch processing. |
+| Data tooling | **pandas + numpy + scipy.sparse** (pyarrow only for Parquet). CSVs are read with `usecols` and small types (`int32`/`float32`/`bool`) and converted to **Parquet once**. **No Polars, DuckDB or SQLite.** | Simple, familiar tools. With explicit types the 41M-row table takes 535 MB in memory (measured in the EDA). Sparse matrices are required for similarity. A database adds nothing for batch processing. |
 | Data size | **Filter to an active core** (min reviews per user, min reviews per game) | Fits in 16 GB of RAM, and active users carry most of the CF signal. Cold users are handled by the content side. |
-| Filter thresholds | **OPEN.** Set from real data at the start of implementation. Stored in `params.yaml`. | Need to measure how much the dataset shrinks at different thresholds. |
-| Adult content | **Blocklist** of tags (e.g. "Sexual Content", "Nudity"), applied to search and recommendations, configurable | Avoids explicit artwork reaching a recruiter in a public demo. |
-| Selectable seeds | Only games with at least N reviews, popular games first in search | People pick games they recognise, and these seeds always have a CF signal. |
-| Recommendation candidates | The whole catalog (except blocklisted games) | Obscure games can still show up through the content side. |
+| Filter thresholds | **`min_user_reviews = 5`, `min_game_reviews = 50`** (positive reviews; users filtered first, then games among those users). Keeps **17.7M interactions (50% of positive reviews), 1.62M users and 13,160 games**. Stored in `params.yaml`. | Held-out evaluation users need at least 5 reviews anyway (3 seeds plus at least 2 hidden). The median user has only 1 positive review, and a user with a single review adds nothing to item-to-item co-occurrence. |
+| Planned experiment | Train on users with **3 or more** reviews (23.3M interactions, 3.3M users), with evaluation users still drawn from those with 5 or more. Compared using `dvc exp`. | Tests whether lighter users improve recall. |
+| Adult content | **No filter. All games are kept.** | The user's decision. The EDA showed the obvious tags ("Sexual Content", "Nudity", "Mature") also cover mainstream games like The Witcher 2 and Far Cry 3. |
+| Selectable seeds | The **~13k games that pass the CF filter** (at least 50 positive reviews from active users), popular games first in search | People pick games they recognise, and every seed has CF neighbours. One rule, no extra parameter. |
+| Recommendation candidates | **Every game with tags** (~49.6k of 50,872) | The ~1.2k games without tags have no content signal. The ~36k games outside the CF set can only come through the content side, which is the item cold-start case the popularity-aware blend handles. |
 
 ---
 
@@ -61,8 +64,11 @@
 - Rejected: ALS fold-in (less explainable) and LightFM (poorly maintained, painful to build in Docker).
 
 ### 4.2 Content-based
-- **Tags:** TF-IDF over tags.
-- **Descriptions:** `sentence-transformers/all-MiniLM-L6-v2` embeddings, 384 dimensions, computed once in the pipeline on the local GPU.
+- **Tags:** plain **TF-IDF** over tags, where every tag a game has counts the same. Tags are the main content signal: 97.6% of games have them (441 distinct tags, up to 20 per game).
+  - Planned experiment: weight tags by their position in the list (`1 / log2(position + 2)`) before applying IDF. Steam probably orders tags by player votes, but this isn't verified for this dataset. Kept only if Recall@10 improves.
+- **Descriptions:** `sentence-transformers/all-MiniLM-L6-v2` embeddings (384 dimensions) of the text **"title: description"**, computed once in the pipeline on the local GPU. Including the title lets series and franchise names carry signal (*Dark Souls III* lands near *Dark Souls II*). Tags are kept out of this text so the two signals stay separate.
+  - Whitespace in descriptions is normalised in code before embedding (including invisible U+2028 line separators found in 3 descriptions).
+  - Only 79.6% of games have a description (median 35 words). **Games without one get their content score from tags only.**
 - Content similarity is a weighted combination of tag cosine and embedding cosine. The weight is a parameter.
 - **The serving container never loads the transformer.** Only the precomputed vectors or neighbour lists are shipped.
 
@@ -88,15 +94,15 @@
 **DVC pipeline (`dvc.yaml`), with all settings in `params.yaml`:**
 
 1. `download`: fetch the dataset with **`kagglehub`** (`kagglehub.dataset_download("antonkozyriev/game-recommendations-on-steam")`) and copy the files from kagglehub's cache into `data/raw/`, which DVC tracks
-
-**EDA** happens in Jupyter notebooks (`notebooks/`), for exploration only. Notebooks load data through the same `steamrec` loader functions, and anything they decide (e.g. filter thresholds) goes into `params.yaml`. Pipeline stages are always scripts, never notebooks.
 2. `validate`: **Pandera** schemas and sanity checks (columns, types, unique IDs, metadata coverage). Fails loudly if the data is wrong.
-3. `filter`: activity thresholds and the adult-content blocklist
+3. `filter`: drop duplicate reviews, keep positive reviews, apply the activity thresholds
 4. `split`: train, validation and test users
 5. `content_features`: tag TF-IDF and description embeddings (GPU locally, CPU in CI)
 6. `cf_similarity`: confidence-weighted, shrunk cosine similarity, top-K neighbours
 7. `evaluate`: grid search on validation users, final metrics on test users, written to `metrics.json`
 8. `export`: serving bundle (game catalog, CF neighbours, content features or neighbours, `manifest.json` with model version, data version and metrics)
+
+**EDA** happens in Jupyter notebooks (`notebooks/`), for exploration only. Notebooks load data through the same `steamrec` loader functions, and anything they decide (e.g. filter thresholds) goes into `params.yaml`. Pipeline stages are always scripts, never notebooks. The findings behind the data decisions in section 3 are in `notebooks/01_eda.ipynb`.
 
 | Decision | Choice |
 |---|---|
@@ -145,7 +151,7 @@
 | Docker | **Required.** The API runs in Docker. Locally, Docker Compose runs the API and a reverse-proxy container serving the frontend. **One image runs everywhere** (locally, on the demo host and on AWS). Base image `python:3.11-slim`. |
 | CI (GitHub Actions) | ruff → unit and API tests → **`dvc repro` on a tiny fixture dataset** (smoke test) → build and push the image. **CI does not retrain** on real data. Real training happens locally and is shared with `dvc push`. |
 | CD | Merging to `main` automatically deploys the free demo. Deploys to AWS are triggered manually. (Details depend on the deployment decision.) |
-| Tests | Unit tests (similarity, shrinkage, blending, filtering, blocklist, on hand-checkable synthetic data). API tests (FastAPI test client with fixture model files). Pipeline smoke test in CI. **Smoke test against the live URL after each deploy.** Stretch goal: one Playwright end-to-end test. |
+| Tests | Unit tests (similarity, shrinkage, blending, filtering, on hand-checkable synthetic data). API tests (FastAPI test client with fixture model files). Pipeline smoke test in CI. **Smoke test against the live URL after each deploy.** Stretch goal: one Playwright end-to-end test. |
 | Git workflow | **GitHub flow:** feature branches, then pull requests into `main` with required CI checks (branch protection), squash merges, plain human-style commit messages with no type prefix (e.g. "Add item similarity stage") |
 | Secrets | GitHub Actions secrets only. No long-lived AWS keys (use GitHub OIDC). |
 | Monitoring | `/health` endpoint and JSON request logs. CloudWatch logs and alarms while AWS is up. Stretch goal: Prometheus and Grafana. |
@@ -213,7 +219,7 @@ Steam Storefront and SteamSpy crawling, SteamID profile lookup, learned re-ranke
 
 ## 12. Next steps
 
-1. Download with kagglehub and do EDA in a notebook: dataset size at different filter thresholds, tag and description coverage, distribution of hours played. Then settle the thresholds.
+1. ~~Download with kagglehub, do EDA, settle the filter thresholds.~~ Done 2026-10-05 (section 3, `notebooks/01_eda.ipynb`).
 2. Deployment session: choose the AWS service and the frontend host (the API host is decided: Render).
 3. Write the formal design spec and implementation plan.
 
